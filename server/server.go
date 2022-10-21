@@ -1,11 +1,11 @@
 package server
 
 import (
-	"Hermes/message"
+	"Hermes/common/dto"
+	"Hermes/common/message"
 	"container/list"
 	"encoding/json"
 	"flag"
-	"fmt"
 	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
@@ -29,37 +29,17 @@ func init() {
 // Start 启动hermes服务
 func (s *Server) Start(websocketPort int) {
 
-	//go func() {
-	//	// 1.获取ticker对象
-	//	ticker := time.NewTicker(1 * time.Second * 5)
-	//	i := 0
-	//	// 子协程
-	//	go func() {
-	//		for {
-	//			//<-ticker.C
-	//			i++
-	//			<-ticker.C
-	//
-	//			fmt.Println("=================")
-	//			for i := GlobalServer.clients.Front(); i != nil; i = i.Next() {
-	//				cli := i.Value.(*Client)
-	//
-	//				fmt.Println("cli cli: ", cli.Conn.RemoteAddr())
-	//
-	//			}
-	//		}
-	//	}()
-	//	for {
-	//	}
-	//}()
-
 	var addr = flag.String("addr", ":"+strconv.Itoa(websocketPort), "websocket service address")
-	http.HandleFunc("/echo", echo)
-	http.ListenAndServe(*addr, nil)
+	http.HandleFunc("/clipboard", clipboard)
+	err := http.ListenAndServe(*addr, nil)
+	if err != nil {
+		log.Fatalln("服务启动失败: ", err)
+		return
+	}
 
 }
 
-func echo(w http.ResponseWriter, r *http.Request) {
+func clipboard(w http.ResponseWriter, r *http.Request) {
 	var upgrader = websocket.Upgrader{
 		// 解决跨域问题
 		CheckOrigin: func(r *http.Request) bool {
@@ -85,17 +65,36 @@ func echo(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			processMessage(conn, message)
+			// just for test
+			client := GlobalServer.getClient(conn)
+			if client != nil && len(client.Info.Name) > 0 {
+				log.Printf("%s: %s \n", client.Info.Name, message)
+			}
 
+			GlobalServer.processMessage(conn, message)
 		}
 	}()
 }
 
+// 通过websocket.Conn获取Client
+func (s *Server) getClient(conn *websocket.Conn) *Client {
+	var c *Client
+	for i := GlobalServer.clients.Front(); i != nil; i = i.Next() {
+		cli := i.Value.(*Client)
+		if cli.Conn.RemoteAddr() == conn.RemoteAddr() {
+			c = cli
+		}
+	}
+	return c
+}
+
+// AddClient 添加一个Client
 func (s *Server) AddClient(conn *websocket.Conn) {
 	client := NewClient(conn)
 	s.clients.PushBack(client)
 }
 
+// RemoveClient 移除一个client
 func (s *Server) RemoveClient(conn *websocket.Conn) {
 	for i := GlobalServer.clients.Front(); i != nil; i = i.Next() {
 		cli := i.Value.(*Client)
@@ -107,7 +106,8 @@ func (s *Server) RemoveClient(conn *websocket.Conn) {
 	}
 }
 
-func processMessage(conn *websocket.Conn, messageByte []byte) {
+// 处理客户端上报的信息
+func (s *Server) processMessage(conn *websocket.Conn, messageByte []byte) {
 	// 反序列化消息
 	var mes message.Message
 	err := json.Unmarshal(messageByte, &mes)
@@ -115,26 +115,26 @@ func processMessage(conn *websocket.Conn, messageByte []byte) {
 		return
 	}
 
-	log.Printf("processMessage mes: %#v", mes)
-
 	switch mes.Typ {
-	case message.ClientInfoType:
+	case message.OnlineType:
 		data, err := json.Marshal(mes.Data)
 		if err != nil {
 			return
 		}
-		var clientInfo message.ClientInfo
+		var clientInfo dto.ClientInfo
 		json.Unmarshal(data, &clientInfo)
-		log.Println("clientInfo: ", clientInfo.Name)
+
+		client := s.getClient(conn)
+		client.Info = clientInfo
+
+		log.Printf("%s(%s/%s)上线\n", clientInfo.Name, clientInfo.Os, clientInfo.Arch)
 	case message.ClipboardType:
 		content := mes.Data.(string)
-		log.Println("ClipboardType: ", content)
-		for i := GlobalServer.clients.Front(); i != nil; i = i.Next() {
+		for i := s.clients.Front(); i != nil; i = i.Next() {
 			cli := i.Value.(*Client)
 			if cli.Conn.RemoteAddr() == conn.RemoteAddr() {
 				continue
 			}
-			fmt.Println("cli.Conn send msg: ", cli.Conn.RemoteAddr())
 			cli.Conn.WriteMessage(websocket.TextMessage, []byte(content))
 		}
 	default:

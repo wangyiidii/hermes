@@ -1,4 +1,4 @@
-package message
+package dto
 
 type ClientInfo struct {
 	Name string `json:"name"`
