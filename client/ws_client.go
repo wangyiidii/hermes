@@ -47,7 +47,7 @@ func Start(host string, serverPort int) {
 	// 发送上线消息
 	GlobalClient.sendOnlineMessage()
 
-	// 测试: 打印服务端推送的消息
+	// 处理服务端消息
 	go func() {
 		for {
 			_, message, err := conn.ReadMessage()
@@ -55,7 +55,7 @@ func Start(host string, serverPort int) {
 				log.Fatalln("client test read :", err)
 				return
 			}
-			log.Printf("recv: %s", message)
+			GlobalClient.processMessage(conn, message)
 		}
 	}()
 
@@ -75,7 +75,6 @@ func (c *Client) writeMessage(msg *message.Message) {
 	c.Mux.Lock()
 	c.Conn.WriteMessage(websocket.TextMessage, d)
 	c.Mux.Unlock()
-
 }
 
 // 发送上线消息
@@ -111,5 +110,26 @@ func (c *Client) watchClipboard() {
 		}
 
 		c.writeMessage(msg)
+	}
+}
+
+func (c *Client) processMessage(conn *websocket.Conn, messageByte []byte) {
+
+	// 反序列化消息
+	var mes message.Message
+	err := json.Unmarshal(messageByte, &mes)
+	if err != nil {
+		return
+	}
+
+	switch mes.Typ {
+	case message.DisconnectType:
+		log.Fatalln(mes.Data)
+	case message.ClipboardType:
+		content := mes.Data.(string)
+		clipboard.Write(clipboard.FmtText, []byte(content))
+	default:
+		log.Fatalln("client processMessage type err")
+		return
 	}
 }

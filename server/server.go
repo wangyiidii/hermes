@@ -3,16 +3,20 @@ package server
 import (
 	"Hermes/common/dto"
 	"Hermes/common/message"
+	"Hermes/common/util"
 	"container/list"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
 	"strconv"
+	"sync"
 )
 
 type Server struct {
+	Mux     sync.Mutex
 	clients *list.List
 }
 
@@ -53,22 +57,29 @@ func clipboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 加入缓存，ip相同的，服务器发送断开纤细，并主动断开
+	GlobalServer.Mux.Lock()
+	exist, client := GlobalServer.ClientExist(conn)
+	if exist {
+
+		conn.WriteJSON(message.NewMessage(message.DisconnectType,
+			fmt.Sprintf("相同IP客户端[%s:%s]已连接，本连接服务器主动断开", client.SimpleInfo(), client.Conn.RemoteAddr()),
+		))
+		conn.Close()
+		GlobalServer.Mux.Unlock()
+		return
+	}
 	GlobalServer.AddClient(conn)
+	GlobalServer.Mux.Unlock()
 
 	// 监听客户端上报的
 	go func() {
 		for {
 			_, message, err := conn.ReadMessage()
 			if err != nil {
+				log.Println("服务端读取信息错误: ", err)
 				GlobalServer.RemoveClient(conn)
-				log.Println("server readMessage err: ", err)
 				return
-			}
-
-			// just for test
-			client := GlobalServer.getClient(conn)
-			if client != nil && len(client.Info.Name) > 0 {
-				log.Printf("%s: %s \n", client.Info.Name, message)
 			}
 
 			GlobalServer.processMessage(conn, message)
@@ -76,10 +87,28 @@ func clipboard(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
+func (s *Server) ClientExist(conn *websocket.Conn) (exist bool, client *Client) {
+	ipParam, _, _ := util.GetIpPortFromAddr(conn.RemoteAddr().String())
+	if len(ipParam) == 0 {
+		return false, nil
+	}
+
+	for i := s.clients.Front(); i != nil; i = i.Next() {
+		client = i.Value.(*Client)
+		ip := client.Ip()
+		if len(ip) > 0 && len(ipParam) > 0 && ip == ipParam {
+			return true, client
+		}
+	}
+
+	return false, nil
+
+}
+
 // 通过websocket.Conn获取Client
 func (s *Server) getClient(conn *websocket.Conn) *Client {
 	var c *Client
-	for i := GlobalServer.clients.Front(); i != nil; i = i.Next() {
+	for i := s.clients.Front(); i != nil; i = i.Next() {
 		cli := i.Value.(*Client)
 		if cli.Conn.RemoteAddr() == conn.RemoteAddr() {
 			c = cli
@@ -90,17 +119,22 @@ func (s *Server) getClient(conn *websocket.Conn) *Client {
 
 // AddClient 添加一个Client
 func (s *Server) AddClient(conn *websocket.Conn) {
-	client := NewClient(conn)
+	client := &Client{
+		Conn: conn,
+	}
 	s.clients.PushBack(client)
 }
 
 // RemoveClient 移除一个client
 func (s *Server) RemoveClient(conn *websocket.Conn) {
-	for i := GlobalServer.clients.Front(); i != nil; i = i.Next() {
+	for i := s.clients.Front(); i != nil; i = i.Next() {
 		cli := i.Value.(*Client)
 		if cli.Conn.RemoteAddr() == conn.RemoteAddr() {
-			log.Printf("client %s disconnected \n", cli.Conn.RemoteAddr())
-			GlobalServer.clients.Remove(i)
+			s.Mux.Lock()
+			log.Printf("客户端 %s 断开连接 \n", cli.Conn.RemoteAddr())
+			s.clients.Remove(i)
+			conn.Close()
+			s.Mux.Unlock()
 			continue
 		}
 	}
@@ -112,6 +146,7 @@ func (s *Server) processMessage(conn *websocket.Conn, messageByte []byte) {
 	var mes message.Message
 	err := json.Unmarshal(messageByte, &mes)
 	if err != nil {
+		log.Println("processMessage json err: ", err)
 		return
 	}
 
@@ -125,7 +160,7 @@ func (s *Server) processMessage(conn *websocket.Conn, messageByte []byte) {
 		json.Unmarshal(data, &clientInfo)
 
 		client := s.getClient(conn)
-		client.Info = clientInfo
+		client.Info = &clientInfo
 
 		log.Printf("%s(%s/%s)上线\n", clientInfo.Name, clientInfo.Os, clientInfo.Arch)
 	case message.ClipboardType:
